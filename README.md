@@ -1,4 +1,9 @@
-# wechat-ilink-muse-bridge
+# wechat-ilink-muse-bridge（私有单主人加固版）
+
+> **本仓库是 [gfydfhcf/wechat-ilink-muse-bridge](https://github.com/gfydfhcf/wechat-ilink-muse-bridge) v1.3.2 的私有加固分支，仅供所有者本人使用：**
+> 1. **单主人锁**：只认首次绑定的那一个微信号，代码级强制——往 `owner.json` 加任何 ID 都不生效，没有"批准新发信人"流程。
+> 2. **无自更新**：版本检查、订阅更新提醒、`update-to` 一句话安装已整体移除（命令保留但拒绝执行），代码里不再有任何 GitHub 外联。更新只能由所有者手动替换文件。
+> 3. 下文沿用的上游介绍中凡涉及"订阅 / 更新提醒 / 一句话安装 / 多账号白名单"的段落，在本分支均已失效，以 `AGENTS.md` 顶部的三条硬规则为准。
 
 [![CI](https://github.com/gfydfhcf/wechat-ilink-muse-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/gfydfhcf/wechat-ilink-muse-bridge/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/gfydfhcf/wechat-ilink-muse-bridge)](https://github.com/gfydfhcf/wechat-ilink-muse-bridge/releases)

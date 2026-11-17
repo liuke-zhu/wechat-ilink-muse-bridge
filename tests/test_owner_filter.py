@@ -115,7 +115,7 @@ class OwnerFilterTest(unittest.TestCase):
         # The id must stay in the commit block: cursor advances past the
         # stranger, so the server never redelivers and the queue can't jam.
         self.assertIn("99", out["commit"]["ids"])
-        # Not in contacts; recorded in the approval queue instead.
+        # Not in contacts; recorded in the knock log instead.
         self.assertNotIn("stranger-1", read_json("contacts.json"))
         book = read_json("unknown_senders.json")
         self.assertEqual(book["stranger-1"]["count"], 1)
@@ -125,11 +125,14 @@ class OwnerFilterTest(unittest.TestCase):
         self.assertEqual(out["msgs"], [])
         self.assertEqual(out["filtered"]["dropped"], 1)
 
-    def test_owner_ids_list_allows_multiple_accounts(self):
+    def test_extra_owner_ids_are_ignored_single_owner_lock(self):
+        # Private fork: only the bound owner_id is honored; widening
+        # owner.json must not grant access to a second account.
         self.set_owners({"owner_id": "a1", "owner_ids": ["a1", "a2"]})
         out = self.poll_with([make_msg(1, "a1"), make_msg(2, "a2")])
-        self.assertEqual(len(out["msgs"]), 2)
-        self.assertEqual(out["filtered"]["dropped"], 0)
+        self.assertEqual(len(out["msgs"]), 1)
+        self.assertEqual(out["msgs"][0]["from_user_id"], "a1")
+        self.assertEqual(out["filtered"]["dropped"], 1)
 
     def test_repeat_stranger_count_increments(self):
         self.set_owners({"owner_id": "owner-1"})
@@ -143,7 +146,7 @@ class OwnerFilterTest(unittest.TestCase):
         out = self.poll_with([make_msg(7, "stranger-1")])
         run_commit(out["commit"])
         # Server redelivers the same id: dedupe drops it before the
-        # allowlist even sees it, so the approval count stays at 1.
+        # allowlist even sees it, so the knock count stays at 1.
         out2 = self.poll_with([make_msg(7, "stranger-1")])
         self.assertEqual(out2["msgs"], [])
         self.assertEqual(out2["filtered"]["dropped"], 0)

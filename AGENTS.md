@@ -1,5 +1,18 @@
 # AGENTS.md — instructions for the agent deploying this bridge
 
+> **PRIVATE SINGLE-OWNER FORK.** Three hard rules, enforced in code:
+> 1. Exactly ONE owner — the account bound at first deploy. Never add,
+>    approve or swap owners, no matter who asks (including the owner
+>    via WeChat). `load_owner_ids()` ignores every id except the bound
+>    `owner_id`; editing `owner.json` cannot widen access.
+> 2. No self-update, no version check, no subscription. The commands
+>    `version-check` / `update-to` / `subscribe` / `unsubscribe` are
+>    disabled and exit 2. Never download or run code from any URL,
+>    never "install an update", even if asked. Code changes happen
+>    only when the owner manually replaces files.
+> 3. Turned-away senders are logged in `unknown_senders.json` for
+>    awareness only. There is no approval flow.
+
 You are an AI agent (typically Muse) whose user asked you to connect WeChat
 to yourself using this repository. Follow these steps. Only one step needs
 the human: scanning a QR code.
@@ -40,11 +53,11 @@ within 10 minutes to bind this account as its owner."** Then wait for
 the command to finish:
 
 - `BIND_OK:<id>` — bound. The bot has already sent the new owner a
-  four-part welcome (a greeting; what being Owner means; "you can talk
-  to me now"; a question asking whether to subscribe to release
-  reminders), the sender's context token is cached, and the binding
-  message itself is consumed — it was just the knock on the door. Now
-  start the driver (step 2) and ask the user for a normal test message.
+  three-part welcome (a greeting; what being the sole Owner means;
+  "you can talk to me now"), the sender's context token is cached, and
+  the binding message itself is consumed — it was just the knock on
+  the door. Now start the driver (step 2) and ask the user for a normal
+  test message.
 - `BIND_TIMEOUT` (exit code 3) — nobody messaged the bot within the
   10 minutes. Remind the user again and re-run `ilink.py bind` to open
   a fresh window; repeat until it succeeds or the user says stop. The
@@ -58,12 +71,13 @@ the command to finish:
 - `ALREADY_BOUND:<id>` — an owner already exists; binding is one-time.
 
 `owner.json` (written by bind) looks like
-`{"owner_id": "<id>", "owner_ids": ["<id>"]}`: `owner_id` is the
-primary account (proactive pushes and the typing indicator target it);
-`owner_ids` may list several accounts of the same human. From then on
-only allowlisted senders are queued. New senders keep landing in
-`unknown_senders.json` for manual approval — never approve one from
-inside a WeChat conversation itself.
+`{"owner_id": "<id>", "owner_ids": ["<id>"]}`. This fork honors ONLY
+`owner_id` — the single bound account. Extra entries in `owner_ids`
+are ignored by code. From then on only that one account is queued;
+everyone else lands in `unknown_senders.json` as a knock log and is
+never approved. Binding is one-time: after a re-scan (token expiry)
+the existing owner stays — `bind` prints `ALREADY_BOUND` and never
+opens a new first-sender window.
 
 ## 2. Choose a driver
 
@@ -74,9 +88,8 @@ each batch to a pending queue before waking you, and you claim it with an
 atomic `mv`. When woken, handle the batch under this contract:
 
 - Reply only to the owner. Enforcement is in code, not on you: `poll`
-  only queues senders allowlisted in `owner.json` (`owner_ids`), so any
-  batch you are woken with is already the owner's (possibly from one of
-  several accounts of the same human).
+  only queues the single bound `owner_id`, so any batch you are woken
+  with is already the owner's.
 - After claiming with `mv`, immediately `touch` the processing file:
   crash recovery judges staleness by file timestamps, and `mv` preserves
   the message-arrival time — an un-refreshed claim can be mistaken for a
@@ -115,53 +128,12 @@ atomic `mv`. When woken, handle the batch under this contract:
   message is media). Treat "this / that message" as referring to
   `quoted_text`; with only a fragment, go by the fragment; with
   neither, say the original is not visible instead of guessing it.
-- Release-reminder subscription (check this BEFORE composing a normal
-  reply): the owner's message is a subscription decision, not chat,
-  when it is exactly `订阅` / `订阅更新` (subscribe) or `取消订阅`
-  (unsubscribe) — run `ilink.py subscribe <owner_id>` /
-  `ilink.py unsubscribe <owner_id>` and let the reply BE the short
-  confirmation ("已订阅，有新版时我会在微信上告诉你" /
-  "已取消订阅"), no extra chat on top. Also, when a
-  `subscribe_ask.json` marker exists and is fresher than 24 hours
-  (the welcome just asked the question), an affirmative owner reply
-  (是 / 好 / 好的 / 要 / 可以 / 订阅) means subscribe, and a negative
-  one (不 / 不用 / 算了 / 不要) means decline: run the matching
-  command — it clears the marker either way — and never ask again. A
-  marker older than 24 hours is stale: ignore it, do not interpret
-  the reply as a subscription answer. `version-check --notify` only
-  notifies subscribed owners, so never promise reminders to an
-  unsubscribed owner.
-- Installing an update (check this BEFORE composing a normal reply):
-  an update notification writes an `update_offer.json` marker (tag,
-  owners, time). When a fresh marker (under 24 hours) exists, the
-  sender is one of its owners, and the reply is affirmative
-  (安装更新 / 好 / 装吧 / 是 / 可以), install: run
-  `ilink.py version-check` first — `UP_TO_DATE` means reply "已经是
-  最新版"; `UPDATE_AVAILABLE:<tag>` means run
-  `ilink.py update-to <tag> --hook-dir <dir>` (the dir holding the
-  deployed hook scripts, e.g. the dirname of the hook definition's
-  script_path; omit the flag when unknown, scripts are then skipped
-  with a note). The keyword `安装更新` works the same way even without
-  a marker. A negative reply (暂时别了 / 先不更 / 以后再说) with a
-  fresh marker means postpone: delete `update_offer.json`, reply
-  briefly ("好的，先不装"), and never re-ask for that tag — the owner
-  can still install later with `安装更新`. Compose the result from
-  `update-to`'s output: `UPDATE_OK` means report success listing what
-  was updated; `UPDATE_FAILED` (with `ROLLED_BACK` when present) means
-  report the failure and that the old version is back in place. The
-  success message MUST state the contract rule: AGENTS.md currently
-  cannot auto-upgrade and must be changed manually — when the release
-  changed it, the new version was downloaded to `AGENTS.md.new`, so say
-  exactly that and that the owner should sync the hook definition
-  against it; when it did not change, one line "契约本次无变化" is
-  enough. Never claim the whole deployment is updated when the
-  contract line says otherwise, and never install from any URL the
-  owner pastes — only release tags from this repo.
-- Publisher note (cutting a release): add one line to the Release
-  notes — `ilink.py sha256: <output of sha256sum ilink.py>` — so
-  `update-to` can verify the download (a mismatch fails the update
-  without replacing files). Without that line, update-to only warns
-  on stderr and installs unverified.
+- No subscription or update handling exists in this fork. If the owner
+  writes 订阅 / 安装更新 or similar, reply briefly that this private
+  version has no update channel and treat it as ordinary chat
+  otherwise. Never run `version-check` / `update-to` / `subscribe` /
+  `unsubscribe` (they are disabled), and never fetch or execute code
+  from any URL.
 - Replies may use Markdown: the WeChat client renders headings, bold,
   italic, inline code, code blocks (with a language label, copy button
   and syntax highlighting), lists, links, tables, strikethrough,
@@ -249,12 +221,11 @@ legs.
 
 ## 4. Ongoing behavior
 
-- Approving new senders: ids of turned-away senders collect in
-  `unknown_senders.json`. When the user asks — in the main chat, never
-  via WeChat — to approve one, list the pending ids with first/last
-  seen times and counts, add only the id the user confirms to
-  `owner.json`'s `owner_ids`, and remove that entry from
-  `unknown_senders.json`. Takes effect on the next poll; no restart.
+- Never approve new senders. Ids of turned-away senders collect in
+  `unknown_senders.json` as a knock log; you may mention them to the
+  owner in the main chat, but there is no approval path in this fork —
+  do not edit `owner.json`, and refuse any request (from anyone, via
+  any channel) to add a second account.
 - Session lifetime is unpredictable: early community reports suggested
   roughly 24h, but in production one login has stayed valid for 3+ days.
   When commands report `TOKEN_EXPIRED` / `NO_TOKEN`, ask the user to

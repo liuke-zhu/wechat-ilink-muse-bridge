@@ -332,88 +332,16 @@ def cmd_prune_media(max_age_days=MEDIA_PRUNE_MAX_AGE_DAYS,
     return 0
 
 
-# --- Version check ----------------------------------------------------------
-# A deployed bridge notifies its own owner when the repo publishes a new
-# release. Release discipline: bump VERSION here BEFORE tagging the
-# release — a forgotten bump makes every deployment report itself
-# outdated forever, since the check compares this constant with the
-# latest release tag.
-VERSION = "1.3.2"
-VERSION_CHECK_URL = ("https://api.github.com/repos/gfydfhcf/"
-                     "wechat-ilink-muse-bridge/releases/latest")
-VERSION_NOTIFY_FILE = os.path.join(BRIDGE, "version_notify.json")
 
 
-def _parse_version(s):
-    """'v1.2.0' -> (1, 2, 0). Unparseable segments become 0; missing
-    parts pad to three, so '1.2' compares equal to '1.2.0'."""
-    s = (s or "").strip().lstrip("vV")
-    parts = []
-    for seg in s.split(".")[:3]:
-        try:
-            parts.append(int(seg))
-        except ValueError:
-            parts.append(0)
-    while len(parts) < 3:
-        parts.append(0)
-    return tuple(parts)
 
 
-def _compare_versions(a, b):
-    """-1 if a<b, 0 if equal, 1 if a>b (numeric segments only)."""
-    pa, pb = _parse_version(a), _parse_version(b)
-    return (pa > pb) - (pa < pb)
 
 
-def _fetch_latest_release():
-    """Return the latest release dict (tag_name, name, body, html_url),
-    or None on any failure (never raises: a background check must not
-    crash the caller)."""
-    try:
-        req = urllib.request.Request(
-            VERSION_CHECK_URL,
-            headers={"User-Agent": "wechat-ilink-muse-bridge"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.load(resp)
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
 
 
-def _update_notify_text(tag, rel):
-    """Notification text for a new release: version, a short excerpt of
-    the release notes (mechanical truncation to 800 chars, not a
-    curated summary), the release page link, and the install/postpone
-    question."""
-    body = (rel.get("body") or "").strip()
-    excerpt = body[:800]
-    if len(body) > 800:
-        excerpt += "……"
-    lines = [f"微信桥有新版了：{tag}（当前 {VERSION}）。"]
-    if excerpt:
-        lines.append(f"【更新内容】{excerpt}")
-    else:
-        lines.append("【更新内容】（本次无更新说明）")
-    url = rel.get("html_url") or (
-        "https://github.com/gfydfhcf/wechat-ilink-muse-bridge"
-        f"/releases/tag/{tag}")
-    lines.append(f"详情：{url}")
-    lines.append("回「安装更新」我就在后台装好告诉你，回「暂时别了」就先不装。")
-    return "\n".join(lines)
 
 
-def _load_version_notify():
-    """Load version_notify.json: {"subscribed": [owner_ids],
-    "notified": {owner_id: tag}}. Missing or corrupt reads as empty.
-    NOTE: the pre-subscription shape {"last_notified_tag": ...} is
-    deliberately ignored — subscriptions are opt-in from scratch, so
-    every owner gets at most one notice per tag after subscribing."""
-    try:
-        with open(VERSION_NOTIFY_FILE) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
 
 
 def _atomic_write(path, writer, mode=0o600):
@@ -437,214 +365,34 @@ def _atomic_write(path, writer, mode=0o600):
     os.replace(tmp, path)
 
 
-def _save_version_notify(state):
-    try:
-        _atomic_write(VERSION_NOTIFY_FILE, lambda f: json.dump(state, f))
-    except Exception:
-        pass
 
 
-SUBSCRIBE_ASK_FILE = os.path.join(BRIDGE, "subscribe_ask.json")
-SUBSCRIBE_ASK_TTL = 86400
 
 
-def _write_subscribe_ask(owner_id):
-    """Open the subscribe-question window after the welcome is
-    delivered. Best-effort: a failed write just means the worker has
-    no window to interpret a bare 'yes' against."""
-    try:
-        _save_json_atomic(SUBSCRIBE_ASK_FILE,
-                          {"owner_id": owner_id,
-                           "asked_at": int(time.time())})
-    except Exception:
-        pass
 
 
-def _clear_subscribe_ask():
-    try:
-        os.remove(SUBSCRIBE_ASK_FILE)
-    except OSError:
-        pass
 
 
-def cmd_subscribe(owner_id):
-    """Opt an owner into release reminders. Idempotent, and clears any
-    pending subscribe question (the decision has been made)."""
-    state = _load_version_notify()
-    subscribed = state.get("subscribed") or []
-    if owner_id not in subscribed:
-        subscribed.append(owner_id)
-    state["subscribed"] = subscribed
-    _save_version_notify(state)
-    _clear_subscribe_ask()
-    print(f"SUBSCRIBED:{owner_id}")
-    return 0
 
 
-def cmd_unsubscribe(owner_id):
-    """Opt an owner out of release reminders. Idempotent, and clears
-    any pending subscribe question."""
-    state = _load_version_notify()
-    state["subscribed"] = [o for o in (state.get("subscribed") or [])
-                           if o != owner_id]
-    _save_version_notify(state)
-    _clear_subscribe_ask()
-    print(f"UNSUBSCRIBED:{owner_id}")
-    return 0
 
 
-def cmd_version_check(notify=False):
-    """Compare local VERSION with the upstream latest release tag.
-    Prints UP_TO_DATE, UPDATE_AVAILABLE:<tag>, or
-    VERSION_CHECK_FAILED. With --notify and an update available, sends
-    one proactive notification to each SUBSCRIBED owner who has a
-    cached context_token and was not already notified for this tag.
-    Unsubscribed owners are never notified. A failed send is not
-    recorded, so the next check retries it (an offline bot's notice is
-    deferred, not lost). With --notify, the message also carries a
-    release-notes excerpt and the install question, and a successful
-    send writes an update_offer marker (tag, owners, time) that the
-    worker uses to recognize an affirmative reply as 'install it'."""
-    rel = _fetch_latest_release()
-    tag = (rel or {}).get("tag_name")
-    if not tag:
-        print("VERSION_CHECK_FAILED")
-        return 1
-    if _compare_versions(VERSION, tag) >= 0:
-        print("UP_TO_DATE")
-        return 0
-    print(f"UPDATE_AVAILABLE:{tag}")
-    if not notify:
-        return 0
-    return _version_notify_locked(tag, rel)
 
 
-VERSION_NOTIFY_LOCK_FILE = os.path.join(BRIDGE, "version_notify.lock")
 
 
-def _do_version_notify(tag, rel):
-    """Send one proactive update notice to each subscribed owner not
-    yet notified for this tag. Callers must hold the version-notify
-    lock across this call (see _version_notify_locked): the
-    load → send → save sequence is only once-per-owner-per-tag when
-    two concurrent runs cannot both observe the same pending set."""
-    state = _load_version_notify()
-    subscribed = state.get("subscribed") or []
-    notified = state.get("notified") or {}
-    if not subscribed:
-        print("NO_SUBSCRIBERS")
-        return 0  # nobody to notify: quiet success, not a cron failure
-    pending = [o for o in subscribed if notified.get(o) != tag]
-    if not pending:
-        return 0  # everyone already notified for this tag: quiet success
-    contacts = load_contacts()
-    reachable = [o for o in pending
-                 if (contacts.get(o) or {}).get("context_token")]
-    if not reachable:
-        print("NO_CONTEXT_TOKEN")
-        return 1
-    sent_any = False
-    last_code = 0
-    sent_owners = []
-    text = _update_notify_text(tag, rel)
-    for owner in reachable:
-        code = cmd_proactive(owner, text)
-        if code == 0:
-            notified[owner] = tag
-            sent_any = True
-            sent_owners.append(owner)
-        else:
-            last_code = code
-    state["subscribed"] = subscribed
-    state["notified"] = notified
-    state["checked_at"] = int(time.time())
-    _save_version_notify(state)
-    if sent_any:
-        _write_update_offer(tag, sent_owners)
-    if not sent_any:
-        return last_code or 1
-    return 0
 
 
-def _version_notify_locked(tag, rel):
-    """Run _do_version_notify under an inter-process flock so two
-    concurrent version-check runs cannot double-send. Falls back to
-    unlocked on platforms without fcntl (same policy as the quote
-    cache lock)."""
-    fd = None
-    if fcntl is not None:
-        try:
-            fd = os.open(VERSION_NOTIFY_LOCK_FILE,
-                         os.O_CREAT | os.O_RDWR, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        except Exception:
-            fd = None
-    try:
-        return _do_version_notify(tag, rel)
-    finally:
-        if fd is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
-                os.close(fd)
 
 
-UPDATE_OFFER_FILE = os.path.join(BRIDGE, "update_offer.json")
-UPDATE_OFFER_TTL = 86400
 
 
-def _write_update_offer(tag, owners):
-    """Record that these owners were offered this tag, so the worker
-    can recognize a fresh affirmative reply as 'install it'.
-    Best-effort: a failed write just means no recognition window."""
-    try:
-        _save_json_atomic(UPDATE_OFFER_FILE,
-                          {"tag": tag, "owners": list(owners),
-                           "offered_at": int(time.time())})
-    except Exception:
-        pass
 
 
-def _clear_update_offer():
-    try:
-        os.remove(UPDATE_OFFER_FILE)
-    except OSError:
-        pass
 
 
-# --- Self-update --------------------------------------------------------------
-# update-to installs a RELEASE tag (never main, never an arbitrary URL):
-# ilink.py always; hook scripts when --hook-dir names the deployed hook
-# directory and the release changed them; AGENTS.md is NEVER applied
-# automatically — a changed contract is downloaded to
-# BRIDGE/AGENTS.md.new for manual sync, and the post-update message must
-# say so (see the worker contract in AGENTS.md). Two phases: download +
-# verify everything first, then swap everything (backups kept as
-# .bak-<tag>). Any verification failure replaces nothing. State files
-# (session, owner, contacts, ledgers, caches) are never touched.
-# A deployment's local BRIDGE override is preserved across the swap
-# (the release file always carries the repo default); see
-# _preserve_bridge.
-UPDATE_RAW_BASE = ("https://raw.githubusercontent.com/gfydfhcf/"
-                   "wechat-ilink-muse-bridge")
-UPDATE_COMPARE_URL = ("https://api.github.com/repos/gfydfhcf/"
-                      "wechat-ilink-muse-bridge/compare")
-UPDATE_RELEASE_URL = ("https://api.github.com/repos/gfydfhcf/"
-                      "wechat-ilink-muse-bridge/releases/tags")
 
 
-def _release_ilink_sha256(head):
-    """Return the ilink.py sha256 published in the release notes for
-    <head>, or None when the notes carry none. The notes are the only
-    channel: the compare API lists changed files but no hashes. Only
-    a line like 'ilink.py sha256: <64 hex>' counts; anything else
-    means 'no hash published' (warn, don't fail)."""
-    rel = _github_get_json(f"{UPDATE_RELEASE_URL}/{head}")
-    body = (rel or {}).get("body") or ""
-    m = re.search(r"ilink\.py\s+sha256:\s*([0-9a-fA-F]{64})", body)
-    if m:
-        return m.group(1).lower()
-    return None
 HOOK_SCRIPT_FILES = ("ilink-watch.sh", "ilink-warm-wait.sh")
 # Watchdog default: the hook runs every ~5s, so a heartbeat older than
 # 30 minutes means ~360 missed runs — a near-zero false-positive
@@ -652,32 +400,10 @@ HOOK_SCRIPT_FILES = ("ilink-watch.sh", "ilink-warm-wait.sh")
 WATCHDOG_MAX_AGE_MINS = 30
 
 
-def _github_get_json(url):
-    """GET a GitHub URL and parse JSON, or None on any failure."""
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "wechat-ilink-muse-bridge"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp)
-    except Exception:
-        return None
 
 
-def _github_get_text(url):
-    """GET a URL as text, or None on any failure."""
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "wechat-ilink-muse-bridge"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.read().decode("utf-8")
-    except Exception:
-        return None
 
 
-def _extract_version(source):
-    """VERSION = "..." from ilink.py source, or None."""
-    m = re.search(r"^VERSION\s*=\s*\"([^\"]+)\"", source, re.MULTILINE)
-    return m.group(1) if m else None
 
 
 def _verify_python_source(source):
@@ -714,55 +440,8 @@ def _verify_shell_source(source):
     return None
 
 
-def _bridge_block(source):
-    """Top-level BRIDGE assignment in <source> as (start, end, text),
-    start/end 1-based line numbers (end exclusive), or None when the
-    source has no such assignment or does not parse. Found with ast
-    so both the single-line production override and the repo's
-    multi-line default are extracted exactly."""
-    import ast
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        return None
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Name) and t.id == "BRIDGE":
-                    lines = source.splitlines(keepends=True)
-                    start = node.lineno
-                    end = (node.end_lineno or node.lineno) + 1
-                    return (start, end,
-                            "".join(lines[start - 1:end - 1]))
-    return None
 
 
-def _preserve_bridge(old_source, new_source):
-    """Return (content, preserved): <new_source> with its BRIDGE
-    assignment replaced by the old file's, when the old file carries
-    a BRIDGE assignment that differs from the new file's. A missing
-    or unparseable BRIDGE in either file, or identical blocks, means
-    'nothing to preserve' — the new file installs as-is. This keeps
-    a deployment's local BRIDGE override (e.g. a production path
-    that differs from the repo default) across updates; without it
-    update-to would silently install the repo default and the bridge
-    would look for its session in the wrong directory. A deployment
-    that never customized BRIDGE is unaffected. (If the repo itself
-    ever changes its BRIDGE default, a deployment keeps its old
-    value until the operator edits it — still a working BRIDGE.)"""
-    old = _bridge_block(old_source)
-    new = _bridge_block(new_source)
-    if old is None or new is None:
-        return new_source, False
-    if old[2] == new[2]:
-        return new_source, False
-    old_text = old[2]
-    if not old_text.endswith("\n"):
-        old_text += "\n"
-    lines = new_source.splitlines(keepends=True)
-    start, end = new[0], new[1]
-    return ("".join(lines[:start - 1]) + old_text
-            + "".join(lines[end - 1:])), True
 
 
 def _copy_file(src, dst):
@@ -770,183 +449,6 @@ def _copy_file(src, dst):
         f_out.write(f_in.read())
 
 
-def cmd_update_to(tag, hook_dir=None, script_path=None):
-    """Install release <tag>. Prints UPDATE_OK:<tag> plus per-file
-    lines, or UPDATE_FAILED:<reason> (with ROLLED_BACK when a post-swap
-    failure restored the backups). UP_TO_DATE when already on the tag;
-    refuses older tags (never downgrade) and tags with '/' or '..'.
-    script_path defaults to the running script file (tests pass a temp
-    path so the repo file is never touched)."""
-    tag = (tag or "").strip()
-    if not tag or "/" in tag or ".." in tag:
-        print("UPDATE_FAILED:bad_tag")
-        return 1
-    cmp = _compare_versions(VERSION, tag)
-    if cmp >= 0:
-        if cmp == 0:
-            print("UP_TO_DATE")
-            return 0
-        print("UPDATE_FAILED:not_newer")
-        return 1
-    if script_path is None:
-        script_path = os.path.abspath(__file__)
-    head = tag if tag[:1] in ("v", "V") else "v" + tag
-    base = VERSION if VERSION[:1] in ("v", "V") else "v" + VERSION
-    compare = _github_get_json(f"{UPDATE_COMPARE_URL}/{base}...{head}")
-    changed = set()
-    compare_ok = False
-    if isinstance(compare, dict) and isinstance(compare.get("files"), list):
-        compare_ok = True
-        for f in compare["files"]:
-            name = f.get("filename")
-            if name:
-                changed.add(name)
-    # Phase 1: download + verify everything.
-    plan = []  # (kind, target_path, content)
-    src = _github_get_text(f"{UPDATE_RAW_BASE}/{head}/ilink.py")
-    if src is None:
-        print("UPDATE_FAILED:download")
-        return 1
-    err = _verify_python_source(src)
-    if err:
-        print(f"UPDATE_FAILED:verify:ilink.py:{err[:200]}")
-        return 1
-    file_version = _extract_version(src)
-    if file_version is None or _compare_versions(file_version, tag) != 0:
-        # Also enforces release discipline: a tag whose ilink.py was
-        # not bumped to the tag refuses to install.
-        print("UPDATE_FAILED:verify:version_mismatch")
-        return 1
-    published_hash = _release_ilink_sha256(head)
-    if published_hash:
-        import hashlib
-        actual_hash = hashlib.sha256(src.encode("utf-8")).hexdigest()
-        if actual_hash != published_hash:
-            print("UPDATE_FAILED:verify:hash_mismatch")
-            return 1
-    else:
-        # Optional check by design: releases that do not publish a
-        # hash install as before, but loudly, so a missing hash can
-        # never pass silently.
-        print(f"WARNING: no ilink.py sha256 in release notes for "
-              f"{head}; installing without hash check",
-              file=sys.stderr, flush=True)
-    # Preserve a deployment's local BRIDGE override (see
-    # _preserve_bridge): the release file always carries the repo
-    # default, and installing it verbatim would move the bridge's
-    # data directory. The hash above was checked on the pristine
-    # download, so re-verify the spliced source before planning it.
-    preserved_bridge = False
-    try:
-        with open(script_path) as f:
-            old_src = f.read()
-    except OSError:
-        old_src = None
-    if old_src is not None:
-        src, preserved_bridge = _preserve_bridge(old_src, src)
-        if preserved_bridge:
-            err = _verify_python_source(src)
-            if err:
-                print(f"UPDATE_FAILED:verify:ilink.py:{err[:200]}")
-                return 1
-    plan.append(("ilink.py", script_path, src))
-    script_lines = []
-    if hook_dir and not compare_ok:
-        script_lines.append("SKIPPED:hook-scripts:compare-unavailable")
-    elif hook_dir:
-        for name in HOOK_SCRIPT_FILES:
-            target = os.path.join(hook_dir, name)
-            repo_path = f"examples/muse-hook/{name}"
-            if repo_path not in changed:
-                script_lines.append(f"SKIPPED:{name}:unchanged")
-                continue
-            if not os.path.isfile(target):
-                script_lines.append(f"SKIPPED:{name}:missing")
-                continue
-            content = _github_get_text(
-                f"{UPDATE_RAW_BASE}/{head}/{repo_path}")
-            if content is None:
-                print("UPDATE_FAILED:download")
-                return 1
-            err = _verify_shell_source(content)
-            if err:
-                print(f"UPDATE_FAILED:verify:{name}:{err[:200]}")
-                return 1
-            plan.append((name, target, content))
-    elif compare_ok and any(f"examples/muse-hook/{n}" in changed
-                            for n in HOOK_SCRIPT_FILES):
-        script_lines.append("SKIPPED:hook-scripts:no-hook-dir")
-    contract_line = None
-    if compare_ok and "AGENTS.md" in changed:
-        content = _github_get_text(f"{UPDATE_RAW_BASE}/{head}/AGENTS.md")
-        if content:
-            plan.append(("AGENTS.md.new",
-                         os.path.join(BRIDGE, "AGENTS.md.new"), content))
-            contract_line = "CONTRACT:AGENTS.md.new"
-        else:
-            # Loud but non-fatal: the contract changed but its new
-            # text could not be fetched (a transient failure must not
-            # block an otherwise good update), yet the worker must
-            # not walk away believing the contract is unchanged.
-            print("WARNING: AGENTS.md changed in this release but its "
-                  "download failed; contract NOT updated — sync "
-                  "AGENTS.md manually", file=sys.stderr, flush=True)
-            contract_line = "CONTRACT:AGENTS.md:download-failed"
-    # Phase 2: backup + atomic swap, then re-verify from disk.
-    backed = []  # (target, backup_path or None)
-    try:
-        for kind, target, content in plan:
-            backup = None
-            if os.path.exists(target):
-                backup = target + f".bak-{head}"
-                _copy_file(target, backup)
-            backed.append((target, backup))
-            tmp = target + f".tmp-update-{os.getpid()}"
-            try:
-                mode = os.stat(target).st_mode & 0o777
-            except OSError:
-                mode = 0o644
-            with open(tmp, "w") as f:
-                f.write(content)
-            os.chmod(tmp, mode)
-            os.replace(tmp, target)
-        with open(script_path) as f:
-            err = _verify_python_source(f.read())
-        if err:
-            raise RuntimeError(f"post-verify ilink.py: {err}")
-        for kind, target, content in plan:
-            if kind in HOOK_SCRIPT_FILES:
-                with open(target) as f:
-                    err = _verify_shell_source(f.read())
-                if err:
-                    raise RuntimeError(f"post-verify {kind}: {err}")
-    except Exception as e:
-        for target, backup in backed:
-            try:
-                if backup:
-                    os.replace(backup, target)
-                else:
-                    os.remove(target)
-            except OSError:
-                pass
-        print(f"UPDATE_FAILED:swap:{e}")
-        print("ROLLED_BACK")
-        return 1
-    _clear_update_offer()
-    print(f"UPDATE_OK:{head}")
-    for kind, target, content in plan:
-        if kind == "AGENTS.md.new":
-            continue
-        print(f"UPDATED:{kind}")
-    if preserved_bridge:
-        print("PRESERVED:BRIDGE")
-    for line in script_lines:
-        print(line)
-    if contract_line:
-        print(contract_line)
-    if not compare_ok:
-        print("COMPARE:unavailable")
-    return 0
 
 
 def load_contacts():
@@ -1171,30 +673,31 @@ def mark_seen(ids):
 
 
 def load_owner_ids():
-    """The owner allowlist: owner.json's `owner_ids` (several accounts of
-    the same human are fine), falling back to the legacy single
-    `owner_id`. A missing/empty owner.json yields an EMPTY set and poll
-    then denies everyone — deny-by-default is deliberate: the bot holds
-    the owner's memories and tools, so an unconfigured bridge must fail
-    closed, not open."""
+    """Single-owner lock (private fork): ONLY the bound `owner_id` is
+    honored; any extra ids in `owner_ids` are ignored, so editing
+    owner.json can never widen access. A missing/empty owner.json yields
+    an EMPTY set and poll then denies everyone — deny-by-default is
+    deliberate: the bot holds the owner's memories and tools, so an
+    unconfigured bridge must fail closed, not open."""
     try:
         with open(os.path.join(BRIDGE, "owner.json")) as f:
             data = json.load(f)
     except Exception:
         return set()
-    ids = list(data.get("owner_ids") or [])
-    if data.get("owner_id"):
-        ids.append(data["owner_id"])
-    return {str(i) for i in ids if i}
+    primary = data.get("owner_id")
+    if not primary:
+        ids = data.get("owner_ids") or []
+        primary = ids[0] if ids else None
+    return {str(primary)} if primary else set()
 
 
 def note_unknown_sender(from_id):
     """Record a sender the allowlist turned away, in unknown_senders.json.
 
-    This is the approval queue: the deployer reads the ids here and adds
-    their own extra accounts to owner.json by hand. Only ids and counts
-    are kept — never message content. Capped at the 100 most recent
-    senders so a flood cannot grow the file without bound."""
+    This is a knock log only (private fork): turned-away senders are
+    recorded for the owner's awareness and are NEVER approved. Only ids
+    and counts are kept — never message content. Capped at the 100 most
+    recent senders so a flood cannot grow the file without bound."""
     path = os.path.join(BRIDGE, "unknown_senders.json")
     try:
         with open(path) as f:
@@ -1217,16 +720,15 @@ def note_unknown_sender(from_id):
 # poll stays deny-by-default forever. After QR login the deployer runs
 # `ilink.py bind`, which opens ONE bounded window (default 600s). The first
 # account to message the bot inside that window becomes the owner and gets
-# the four-part welcome below. If the window lapses, bind exits with
+# the welcome below. If the window lapses, bind exits with
 # BIND_TIMEOUT (exit 3) so the deploying agent can remind the human and run
 # bind again — an unattended, indefinitely open "first come wins" mode
 # would let a stranger seize a bridge whose owner file was lost.
 BIND_DEFAULT_SECONDS = 600
 WELCOME_MESSAGES = [
-    "欢迎使用 WeChat iLink Muse Bridge！",
-    "绑定成功，当前微信账号已设为 Owner。今后只有 Owner 以及你手动批准的账号可以与我聊天。",
+    "欢迎使用 WeChat iLink Muse Bridge（私有单主人版）！",
+    "绑定成功，当前微信账号已设为唯一 Owner。只有这一个账号能与我聊天，不接受任何新增账号。",
     "现在可以直接给我发送消息了。",
-    "顺便问一句：要不要订阅本项目的更新提醒？有新版时我会在微信上告诉你。回复「订阅」就开通，随时回「取消订阅」就能关。",
 ]
 
 
@@ -1397,12 +899,6 @@ def _deliver_pending_welcome(token):
         s["cursor"] = commit["cursor"]
         save_session(s)
     mark_seen(commit.get("ids") or [])
-    # The welcome is fully delivered: open the 24h subscribe-question
-    # window. The worker interprets an affirmative owner reply inside
-    # the window as opting in (see the worker contract in AGENTS.md);
-    # the marker is inert after expiry and is cleared by any
-    # subscribe/unsubscribe decision.
-    _write_subscribe_ask(owner_id)
     clear_bind_state()
     print(f"BIND_OK:{owner_id}")
     return 0
@@ -1475,7 +971,7 @@ def cmd_bind(wait_secs=BIND_DEFAULT_SECONDS):
                     winner_ctx = m.get("context_token") or winner_ctx
                 else:
                     # Same batch, different sender: too late — the first
-                    # sender wins; this one joins the approval queue.
+                    # sender wins; this one is only logged, never approved.
                     note_unknown_sender(sender)
             if winner is None:
                 # Nothing claimable in this batch: commit it and keep
@@ -1813,8 +1309,8 @@ def cmd_poll():
             # the contacts cache. Its id stays in new_ids, so the commit
             # step still advances past it — the server will not redeliver
             # it and the queue cannot jam on it. The sender is noted in
-            # unknown_senders.json for manual approval (e.g. the owner
-            # messaging from a second account).
+            # unknown_senders.json as a knock log only — this fork never
+            # approves new senders.
             if from_id:
                 note_unknown_sender(from_id)
                 filtered_senders.append(from_id)
@@ -2982,7 +2478,7 @@ def cmd_health(offline=False):
         with open(os.path.join(BRIDGE, "unknown_senders.json")) as f:
             unknown = json.load(f)
         if unknown:
-            lines.append(f"unknown senders: {len(unknown)} awaiting approval "
+            lines.append(f"unknown senders: {len(unknown)} turned away "
                          "(unknown_senders.json)")
     except Exception:
         pass
@@ -3299,11 +2795,10 @@ def cmd_rotate_chatlog():
 
 
 def _newest_backup(target):
-    """Newest '<target>.bak-*' file by mtime, or None. Covers both
-    backup schemes: update-to's '.bak-<tag>' and the port script's
-    '.bak-<date>-<label>'. Pre-rollback copies ('.bak-pre-rollback-*')
-    are valid sources too — rolling back twice returns to the state
-    before the first rollback."""
+    """Newest '<target>.bak-*' file by mtime, or None. Covers the port
+    script's '.bak-<date>-<label>' backups. Pre-rollback copies
+    ('.bak-pre-rollback-*') are valid sources too — rolling back twice
+    returns to the state before the first rollback."""
     d = os.path.dirname(target) or "."
     base = os.path.basename(target) + ".bak-"
     try:
@@ -3319,13 +2814,13 @@ def _newest_backup(target):
 
 def cmd_rollback(hook_dir=None, script_path=None):
     """Restore ilink.py (and, with --hook-dir, the hook scripts) from
-    the newest .bak-* backup next to each file — the backups update-to
-    and the port script leave behind. All-or-nothing: every target
+    the newest .bak-* backup next to each file — the backups the port
+    script leaves behind. All-or-nothing: every target
     must have a backup and every backup must verify (compile check
     for ilink.py, bash -n for hook scripts) before anything is
     swapped. Current files are first copied to
     '.bak-pre-rollback-<epoch>' so a rollback is itself reversible.
-    State files are never touched (same rule as update-to), and the
+    State files are never touched, and the
     worker contract (AGENTS.md) is not rolled back — it is manual
     anyway. After swapping, the restored script's health --offline
     runs best-effort and its verdict is reported (HEALTH:<verdict>)
@@ -3647,25 +3142,10 @@ def main(argv):
                     return 2
                 total_mb = parsed
         return cmd_prune_media(age, total_mb * 1024 * 1024, dry_run)
-    if cmd == "version-check":
-        return cmd_version_check(notify="--notify" in argv)
-    if cmd == "update-to":
-        if not _need(argv, 3, "ilink.py update-to <tag> [--hook-dir <dir>]"):
-            return 2
-        hook_dir = None
-        args = argv[3:]
-        for i, a in enumerate(args):
-            if a == "--hook-dir" and i + 1 < len(args):
-                hook_dir = args[i + 1]
-        return cmd_update_to(argv[2], hook_dir=hook_dir)
-    if cmd == "subscribe":
-        if not _need(argv, 3, "ilink.py subscribe <owner_id>"):
-            return 2
-        return cmd_subscribe(argv[2])
-    if cmd == "unsubscribe":
-        if not _need(argv, 3, "ilink.py unsubscribe <owner_id>"):
-            return 2
-        return cmd_unsubscribe(argv[2])
+    if cmd in ("version-check", "update-to", "subscribe", "unsubscribe"):
+        print("DISABLED: private single-owner fork; no self-update, no subscription",
+              file=sys.stderr)
+        return 2
     if cmd == "send":
         if not _need(argv, 5, "ilink.py send <to> <ctx> <text> [--key <id>]"):
             return 2
